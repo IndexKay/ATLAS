@@ -1,0 +1,7 @@
+.env
+
+./ATLAS/_pycache_
+
+./ATLAS/TTS/Output.wav
+
+.ATLAS/TTS/models
