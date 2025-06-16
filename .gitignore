@@ -5,3 +5,5 @@ ATLAS/TTS/Output.wav
 ATLAS/TTS/models/
 
 ATLAS/__pycache__/
+
+realtimesst.log

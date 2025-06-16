@@ -21,8 +21,6 @@ class ATLAS:
         self.processing_response = False
         self.processing_speech = False
 
-        warnings.filterwarnings("ignore", module="RealtimeTTS")
-
         self.main_model = "llama3.2"
         self.system_behavior = (
             """
@@ -82,7 +80,6 @@ class ATLAS:
         }
         self.conversation_history = [{'role': 'system', 'content': self.system_behavior}]
         
-        self.wake_word = 'jarvis'
         self.recorder_config = {
             'model': 'large-v3',
             'spinner': False,
@@ -92,6 +89,16 @@ class ATLAS:
             'post_speech_silence_duration': 0.6,
             'min_length_of_recording': 0.2,
             'min_gap_between_recordings': 0.2,
+
+        }
+        self.wakeword_config = {
+            'spinner': True,
+            'wake_words': 'atlas',
+            'wakeword_backend': 'oww',
+            'openwakeword_model_paths': 'atlas/stt/atlas.onnx',
+            'on_wakeword_detected': self.wakeword_detected,
+            'wake_word_buffer_duration': 1,
+            'wake_words_sensitivity': 0.35,
         }
 
         self.input_queue = asyncio.Queue()
@@ -169,10 +176,9 @@ class ATLAS:
                     voice="./ATLAS/TTS/voice_sample/audio.wav",
                     local_models_path = "./ATLAS/TTS/models",            
                 )
-                self.start = self.tts_playback_start
-                self.stop = self.tts_playback_end
+
                 # Starting the Text to Audio Stream
-                self.stream = TextToAudioStream(self.engine, on_audio_stream_start=self.start ,on_audio_stream_stop=self.stop)
+                self.stream = TextToAudioStream(engine=self.engine)
                 # Generating a warm up generation for better performance on first Generation from the user
                 self.stream.feed("warm up").play(muted=True)
                 
@@ -189,7 +195,7 @@ class ATLAS:
             try:
                 # Initializing the recorder with and without wake word
                 self.recorder = AudioToTextRecorder(**self.recorder_config)
-                self.recorder_wakeWord = AudioToTextRecorder(wake_words=self.wake_word, wakeword_backend="pvporcupine")
+                self.recorder_wakeWord = AudioToTextRecorder(**self.wakeword_config)
             except Exception as e:
                 print(Fore.RED + f"Error initializing AudioToTextRecorder: {e}")
                 self.recorder = None  # Or handle this appropriately
@@ -233,8 +239,12 @@ class ATLAS:
         return diagnostics
     
 
+    def wakeword_detected(self):
+        ''' If the Wake word is detected and activate the AI '''
+        self.conversation_status = True
+
     async def clear_queues(self, text=""):
-        # Clears all data from the input, response, and audio queues.
+        '''Clears all data from the input, response, and audio queues.'''
         queues = [self.input_queue, self.response_queue, self.audio_queue]
         for q in queues:
             while not q.empty():
@@ -244,7 +254,7 @@ class ATLAS:
                     break  # Queue is empty
 
     async def input_message(self):
-        # Function to manually input a user response
+        '''Function to manually input a user response'''
         while True:
             try:
                 prompt = await asyncio.to_thread(input, "Enter your message: ")
@@ -261,61 +271,56 @@ class ATLAS:
     async def prompt_response(self):
         print(Fore.LIGHTBLUE_EX)
         while True:
-            if self.processing_response == False:
+            try:
+                # Identify the processing has started
+                self.processing_response = True
+
+                # Retrieve prompt from the input queue
+                prompt = await self.input_queue.get()
+                
+                if prompt is None:
+                    break  # Exit loop if None is received
+
+                # Upload the user input prompt to the conversation array in a json format the lLM can understand
+                convo = self.conversation_history
+                user_prompt = {"role": "user", "content": prompt}
+                convo.append(user_prompt)
+
                 try:
-                    self.processing_response = True
+                    # Getting the streamed response from the LLM using ollama and Conversation data
+                    response = ollama.chat(model=self.main_model, options=self.model_params, messages=convo, stream=True)
+                    full_response = ""
+                    print(f'\nATLAS:')
 
-                    # Retrieve prompt from the input queue
-                    prompt = await self.input_queue.get()
-                    if prompt is None:
-                        break  # Exit loop if None is received
-
-                    # Upload the user input prompt to the conversation array in a json format the lLM can understand
-                    convo = self.conversation_history
-                    user_prompt = {"role": "user", "content": prompt}
-                    convo.append(user_prompt)
-
-                    try:
-                        # Getting the streamed response from the LLM using ollama and Conversation data
-                        response = ollama.chat(model=self.main_model, options=self.model_params, messages=convo, stream=True)
-                        full_response = ""
-                        print('\nATLAS:')
-
-                        for chunk in response:
-                            chunk_content = chunk['message']['content']
+                    for chunk in response:
+                        chunk_content = chunk['message']['content']
                             
-                            # Insert the generated response chunks into the Async response queue
-                            await self.response_queue.put(chunk_content)
-                            await asyncio.sleep(0)
+                        # Insert the generated response chunks into the Async response queue
+                        await self.response_queue.put(chunk_content)
+                        await asyncio.sleep(0)
                         
-                            if chunk_content:
-                                full_response += chunk_content
-                                print(chunk_content, end="", flush=True) #print chunks on same line
+                        if chunk_content:
+                            full_response += chunk_content
+                            print(chunk_content, end="", flush=True) #print chunks on same line
                             
-                        print()
-                        # Upload the AI input to the conversation array in a json format the lLM can understand
-                        convo.append({'role': 'assistant', 'content': full_response})
+                    print()
+                    # Upload the AI input to the conversation array in a json format the lLM can understand
+                    convo.append({'role': 'assistant', 'content': full_response})
 
-                    except Exception as e:
-                        print(f"An error occurred in prompt_response: {e}")
-                except asyncio.CancelledError:
-                    break
                 except Exception as e:
-                    print(f"Unexpected error in prompt_response: {e}")
-
-                finally:  # Ensure the sentinel value is added even if an error occurs
-                    await self.response_queue.put(None)
-                    self.processing_response = False
-                    #resets output color back to normal
-                    print(Style.RESET_ALL)
-            else:
+                    print(f"An error occurred in prompt_response: {e}")
+            except asyncio.CancelledError:
                 break
-  
-    def tts_playback_start(self):
-        self.processing_speech = True
+            except Exception as e:
+                print(f"Unexpected error in prompt_response: {e}")
 
-    def tts_playback_end(self):
-        self.processing_speech = False
+            finally:  # Ensure the sentinel value is added even if an error occurs
+                await self.response_queue.put(None)
+
+                # Identify the processing has ended
+                self.processing_response = False
+                #resets output color back to normal
+                print(Style.RESET_ALL)
 
     async def tts(self):
         while True:
@@ -326,31 +331,26 @@ class ATLAS:
                     continue
                 # Steaming the generated audio for the inputted text
                 self.stream.feed(chunk)
-                if self.processing_speech == False:
-                    self.stream.play_async()              
-
+                self.stream.play_async()
+            
     async def stt(self):
         if self.recorder is None:
             print("Audio recorder is not initialized.")
             return
 
         while True:
-            if self.conversation_status == True:
-                if self.processing_response == False:
-                    try:
-                        text = await asyncio.to_thread(self.recorder.text)
-                        await self.clear_queues()
-                        await self.input_queue.put(text)
-                        print(f'USER: \n{text}')
-                    except Exception as e:
-                        print(f"Error in listen: {e}")
-                        continue  # Continue the loop even if there's an error
-                else:
-                    break
-
-            elif self.conversation_status == False:
+            # If a conversation is currently in progress
+            if self.conversation_status:
                 try:
-                    self.conversation_status = True
+                    text = await asyncio.to_thread(self.recorder.text)
+                    await self.clear_queues()
+                    await self.input_queue.put(text)
+                    print(f'USER: \n{text}')
+                except Exception as e:
+                    print(f"Error in listen: {e}")
+                    continue  # Continue the loop even if there's an error
+            else:
+                try:
                     text = await asyncio.to_thread(self.recorder_wakeWord.text)
                     await self.clear_queues()
                     await self.input_queue.put(text)
@@ -399,7 +399,3 @@ class ATLAS:
             muted=mute
         )
     
-    
-
-if __name__ == "__main__":
-    atlas = ATLAS()
