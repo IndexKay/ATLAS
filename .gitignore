@@ -7,3 +7,5 @@ ATLAS/TTS/models/
 ATLAS/__pycache__/
 
 realtimesst.log
+
+tests/tts_output/
